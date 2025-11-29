@@ -1,0 +1,179 @@
+#!/usr/bin/env python3
+
+import time
+import csv
+import busio
+from digitalio import DigitalInOut
+import board
+import adafruit_rfm9x
+
+from gpiozero import RGBLED  # <-- RGB LED
+
+# ================================
+# RGB LED SETUP (BCM numbering)
+# ================================
+RED_PIN   = 16
+GREEN_PIN = 20
+BLUE_PIN  = 21
+
+# Common CATHODE RGB LED
+led = RGBLED(red=RED_PIN, green=GREEN_PIN, blue=BLUE_PIN, active_high=True)
+
+def flash_color(color, flashes=3, on_time=1.0, off_time=0.5):
+    """
+    Flash the RGB LED a few times with the given color.
+    Defaults match other nodes: 3 flashes, 1s on, 0.5s off.
+    """
+    for _ in range(flashes):
+        led.color = color
+        time.sleep(on_time)
+        led.off()
+        time.sleep(off_time)
+
+# ================================
+# LoRa CONFIG
+# ================================
+CS = DigitalInOut(board.CE1)
+RESET = DigitalInOut(board.D25)
+spi = busio.SPI(board.SCK, MOSI=board.MOSI, MISO=board.MISO)
+
+print("[BRAIN] Initializing LoRa radio...")
+rfm9x = adafruit_rfm9x.RFM9x(spi, CS, RESET, 433.0)
+rfm9x.tx_power = 13
+print("[BRAIN] LoRa initialized at 433.0 MHz, tx_power =", rfm9x.tx_power)
+
+OUTPUT_CSV = "output.csv"
+
+DEVICE_NAMES = {
+    "0": "Brain",
+    "1": "Geophone",
+    "2": "Camera",
+    "3": "Thumper",
+    "4": "Lights",
+}
+
+# ================================
+# LED COLORS FOR EVENTS
+# ================================
+DEVICE_COLORS = {
+    "1": (0, 1, 0),   # Green   (RECEIVE 1.0)
+    "2": (0, 0, 1),   # Blue    (RECEIVE 2.0)
+    "3": (1, 0, 0),   # Red
+    "4": (1, 1, 0),   # Yellow
+    "0": (1, 1, 1),   # White
+}
+
+SEND_TO_2_COLOR  = (1, 1, 1)  # White for 0.2
+SEND_TO_34_COLOR = (1, 1, 0)  # YELLOW for 0.34  <<< UPDATED
+
+def process_incoming_messages(message: str):
+    try:
+        print(f"[BRAIN] Raw message decoded: '{message}'")
+        parts = message.strip().split(".")
+        if len(parts) != 2:
+            print("[BRAIN] Invalid Message Format (expected 'ID.DATA')")
+            return None, None
+        return parts[0], parts[1]
+    except:
+        return None, None
+
+# ================================
+# STATE MACHINE
+# ================================
+WAITING_FOR_GEO = "WAITING_FOR_GEO"
+WAITING_FOR_CAMERA = "WAITING_FOR_CAMERA"
+
+current_state = WAITING_FOR_GEO
+
+CAMERA_TIMEOUT = 90
+camera_wait_start = None
+
+counter = 0
+
+print("[BRAIN] Starting main receive loop...")
+print(f"[BRAIN] Initial state = {current_state}")
+
+try:
+    while True:
+        packet = rfm9x.receive(timeout=5.0)
+
+        # Timeout check
+        if packet is None:
+            if current_state == WAITING_FOR_CAMERA and camera_wait_start:
+                if time.time() - camera_wait_start > CAMERA_TIMEOUT:
+                    print("[BRAIN] CAMERA TIMEOUT -> back to GEO state")
+                    current_state = WAITING_FOR_GEO
+                    camera_wait_start = None
+            continue
+
+        msg = packet.decode("utf-8", errors="ignore").strip()
+        device_id, data = process_incoming_messages(msg)
+        if device_id is None:
+            continue
+
+        # Log to CSV
+        try:
+            with open(OUTPUT_CSV, "a", newline="") as f:
+                csv.writer(f).writerow([device_id, data, counter, time.time(), current_state])
+        except:
+            pass
+
+        # ================================
+        # LOGIC: DATA == "0"
+        # ================================
+        if data == "0":
+
+            # ================================
+            # RECEIVING 1.0 (Geophone)
+            # ================================
+            if current_state == WAITING_FOR_GEO and device_id == "1":
+                print("[BRAIN] RECEIVED from Geophone (1.0)")
+
+                # LED = GREEN (receive 1.0)
+                flash_color((0, 1, 0))
+
+                # ================================
+                # SEND 0.2 to CAMERA
+                # ================================
+                print("[BRAIN] SENDING to Camera (0.2)")
+                out_msg = "0.2"
+                rfm9x.send(out_msg.encode())
+
+                # LED = WHITE (send 0.2)
+                flash_color(SEND_TO_2_COLOR)
+
+                current_state = WAITING_FOR_CAMERA
+                camera_wait_start = time.time()
+                continue
+
+            # ================================
+            # RECEIVING 2.0 (Camera)
+            # ================================
+            if current_state == WAITING_FOR_CAMERA and device_id == "2":
+                print("[BRAIN] RECEIVED from Camera (2.0)")
+
+                # LED = BLUE (receive 2.0)
+                flash_color((0, 0, 1))
+
+                # ================================
+                # SEND 0.34 to THUMPER+LIGHTS
+                # ================================
+                print("[BRAIN] SENDING to 3 & 4 (0.34)")
+                out_msg = "0.34"
+                rfm9x.send(out_msg.encode())
+
+                # LED = YELLOW (send 0.34)
+                flash_color(SEND_TO_34_COLOR)
+
+                current_state = WAITING_FOR_GEO
+                camera_wait_start = None
+                continue
+
+        counter += 1
+        time.sleep(0.1)
+
+except KeyboardInterrupt:
+    print("\n[BRAIN] Stopping...")
+
+finally:
+    led.off()
