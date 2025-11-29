@@ -1,0 +1,103 @@
+import digitalio
+import board
+import busio
+import adafruit_rfm9x
+import pygame
+import time
+import RPi.GPIO as GPIO
+
+# ───────────────── LED SETUP ─────────────────
+GPIO.setmode(GPIO.BCM)
+
+RED_PIN   = 16   # physical pin 36
+GREEN_PIN = 20   # physical pin 38
+BLUE_PIN  = 21   # physical pin 40
+
+GPIO.setup(RED_PIN, GPIO.OUT)
+GPIO.setup(GREEN_PIN, GPIO.OUT)
+GPIO.setup(BLUE_PIN, GPIO.OUT)
+
+def led_off():
+    GPIO.output(RED_PIN, GPIO.LOW)
+    GPIO.output(GREEN_PIN, GPIO.LOW)
+    GPIO.output(BLUE_PIN, GPIO.LOW)
+
+def solid_yellow():
+    GPIO.output(RED_PIN, GPIO.HIGH)
+    GPIO.output(GREEN_PIN, GPIO.HIGH)
+    GPIO.output(BLUE_PIN, GPIO.LOW)
+
+def flash_yellow(times=3, on=1.0, off=0.5):
+    for _ in range(times):
+        solid_yellow()
+        time.sleep(on)
+        led_off()
+        time.sleep(off)
+
+# ───────────────── LoRa Setup ─────────────────
+RADIO_FREQ_MHZ = 433.0
+CS = digitalio.DigitalInOut(board.CE1)
+RESET = digitalio.DigitalInOut(board.D25)
+spi = busio.SPI(board.SCK, MOSI=board.MOSI, MISO=board.MISO)
+rfm9x = adafruit_rfm9x.RFM9x(spi, CS, RESET, RADIO_FREQ_MHZ)
+
+# ───────────────── Audio Setup ─────────────────
+pygame.mixer.init()
+
+def process_incoming_messages(message):
+    try:
+        print(f"Raw message: '{message}'")
+        parts = message.strip().split(',')
+        if len(parts) < 3:
+            parts = message.strip().split(':')
+        if len(parts) < 1:
+            print("Invalid Message Format")
+            return None
+        device_id = parts[0]
+        print(f"Processed device_id: {device_id}")
+        return device_id
+    except Exception as e:
+        print(f"Error processing message: {e}")
+        return None
+
+def play_audio():
+    pygame.mixer.music.load('/home/jumboshoo/Documents/35Hz.mp3')
+    pygame.mixer.music.play()
+    time.sleep(180)  # 3 minutes
+    pygame.mixer.music.stop()
+
+# ───────────────── Main Loop ─────────────────
+try:
+    while True:
+        start_time = time.time()
+        messages_received = []
+        print("Waiting for message for 60 seconds")
+
+        received_message = rfm9x.receive(timeout=60)  # up to 60 seconds wait
+
+        if received_message is not None:
+            received_str = str(received_message, 'utf-8').strip()
+            device_id = process_incoming_messages(received_str)
+            if device_id is not None:
+                messages_received.append(device_id)
+                print(messages_received)
+
+        # ───────────────── MESSAGE HANDLING ─────────────────
+        if messages_received:
+            print(f"Received {len(messages_received)} messages: {messages_received}")
+
+            if "0.34" in messages_received:
+                print("Message 0.34 RECEIVED → Thumper ON for 3 min")
+
+                # ⭐ LED FEEDBACK FOR RECEIVING 0.34
+                flash_yellow()   # 💛 flash yellow 3 times
+
+                play_audio()
+
+            else:
+                print("Unidentified Message Received")
+
+finally:
+    led_off()
+    GPIO.cleanup()
+    print("GPIO cleaned up.")
